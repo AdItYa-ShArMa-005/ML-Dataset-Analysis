@@ -12,25 +12,18 @@ from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.cluster import DBSCAN, OPTICS
 from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, r2_score
 
-# --- 1. UI ESTHETICS ---
+# --- UI ---
 st.set_page_config(page_title="Dataset Analysis Dashboard", layout="wide")
-
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; background-color: #161b22; padding: 15px; border-radius: 15px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; border-radius: 8px; background-color: #21262d; color: #8b949e; font-weight: bold; }
-    .stTabs [aria-selected="true"] { background-color: #238636 !important; color: white !important; }
-    </style>
-    """, unsafe_allow_html=True)
 
 st.title("🛡️ Dataset Analysis Dashboard")
 
-# --- 2. DATA PERSISTENCE ---
+# --- SESSION ---
 if 'df_raw' not in st.session_state:
     st.session_state.df_raw = None
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("📍 Step 1: Definition")
     problem_type = st.radio("Problem Type", ["Classification", "Regression"])
@@ -43,138 +36,135 @@ with st.sidebar:
             st.session_state.df_raw = pd.read_csv(uploaded_file)
             st.rerun()
 
-# --- 3. GLOBAL PROCESSING (Fixed NameError) ---
+# --- MAIN ---
 if st.session_state.df_raw is not None:
     df = st.session_state.df_raw.copy()
-    
-    # Global Encoding for Math
+
+    # Encoding
     df_enc = df.copy()
     for col in df_enc.columns:
         if not pd.api.types.is_numeric_dtype(df_enc[col]):
             df_enc[col] = LabelEncoder().fit_transform(df_enc[col].astype(str))
-    
-    # Global X, y preparation for Training/Tuning/Selection
-    # We drop NaNs here to ensure X and y are always defined
+
     df_final = df_enc.dropna()
     target_options = list(df_final.columns)
-    
-    tabs = st.tabs(["📊 Data & PCA", "📈 Visual EDA", "🛠️ Engineering", "🎯 Selection", "🤖 Training", "🚀 Tuning"])
 
-    # --- TAB 1: DATA & PCA ---
+    tabs = st.tabs([
+        "📊 Data & PCA", "📈 Visual EDA", "🛠️ Engineering",
+        "🎯 Selection", "🤖 Training", "📂 Data Split",
+        "📉 Performance", "🚀 Tuning"
+    ])
+
+    # --- TAB 1 ---
     with tabs[0]:
         st.subheader("Dataset Geometry & PCA")
-        target_col = st.selectbox("Select Target (Y)", target_options)
-        feat_cols = st.multiselect("Features for PCA", [c for c in df_final.columns if c != target_col], default=[c for c in df_final.columns if c != target_col][:5])
-        
+        target_col = st.selectbox("Target", target_options)
+        feat_cols = st.multiselect("Features", [c for c in df_final.columns if c != target_col])
+
         if len(feat_cols) >= 2:
             pca_input = StandardScaler().fit_transform(df_final[feat_cols])
             pca_res = PCA(n_components=2).fit_transform(pca_input)
-            fig_pca = px.scatter(x=pca_res[:,0], y=pca_res[:,1], color=df.loc[df_final.index, target_col].astype(str),
-                                 title="2D PCA Projection", template="plotly_dark", height=600)
-            st.plotly_chart(fig_pca, use_container_width=True)
+            fig = px.scatter(x=pca_res[:,0], y=pca_res[:,1],
+                             color=df.loc[df_final.index, target_col].astype(str))
+            st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 2: VISUAL EDA ---
+    # --- TAB 2 ---
     with tabs[1]:
-        st.subheader("Exploratory Data Analysis")
-        st.markdown("### 📋 Raw Data Preview")
-        st.dataframe(df.head(15), use_container_width=True)
-        st.markdown("### 🗺️ Correlation Heatmap")
-        fig_corr = px.imshow(df_final.corr(), text_auto=".2f", aspect="auto", color_continuous_scale='Viridis', height=700)
-        st.plotly_chart(fig_corr, use_container_width=True)
+        st.dataframe(df.head())
+        fig_corr = px.imshow(df_final.corr())
+        st.plotly_chart(fig_corr)
 
-    # --- TAB 3: DATA ENGINEERING (Enhanced) ---
+    # --- TAB 3 ---
     with tabs[2]:
-        st.subheader("Cleaning & Outliers")
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.markdown("#### 🩹 Imputation")
-            imp_choice = st.selectbox("Select Imputation Method", ["Mean", "Median", "Zero", "Drop NaNs"])
-            if st.button("Apply Imputation"):
-                if imp_choice == "Mean": st.session_state.df_raw = st.session_state.df_raw.fillna(st.session_state.df_raw.mean(numeric_only=True))
-                elif imp_choice == "Median": st.session_state.df_raw = st.session_state.df_raw.fillna(st.session_state.df_raw.median(numeric_only=True))
-                elif imp_choice == "Zero": st.session_state.df_raw = st.session_state.df_raw.fillna(0)
-                elif imp_choice == "Drop NaNs": st.session_state.df_raw = st.session_state.df_raw.dropna()
-                st.toast(f"Imputation ({imp_choice}) successful!", icon="✅")
-                st.rerun()
+        st.subheader("Data Cleaning")
 
-        with col_b:
-            st.markdown("#### 🕵️ Outlier Detection")
-            out_alg = st.selectbox("Detection Algorithm", ["IQR", "Isolation Forest", "DBSCAN", "OPTICS"])
-            if st.button("Detect & Remove Outliers"):
-                num_only = st.session_state.df_raw.select_dtypes(include=[np.number]).dropna()
-                idx_to_drop = []
-                
-                if out_alg == "IQR":
-                    q1, q3 = num_only.quantile(0.25), num_only.quantile(0.75)
-                    iqr = q3 - q1
-                    idx_to_drop = num_only[((num_only < (q1 - 1.5 * iqr)) | (num_only > (q3 + 1.5 * iqr))).any(axis=1)].index
-                elif out_alg == "Isolation Forest":
-                    idx_to_drop = num_only.index[IsolationForest().fit_predict(num_only) == -1]
-                elif out_alg in ["DBSCAN", "OPTICS"]:
-                    scaled_out = StandardScaler().fit_transform(num_only)
-                    clusterer = DBSCAN() if out_alg == "DBSCAN" else OPTICS()
-                    idx_to_drop = num_only.index[clusterer.fit_predict(scaled_out) == -1]
-                
-                st.session_state.df_raw = st.session_state.df_raw.drop(idx_to_drop)
-                st.success(f"Notification: Successfully removed {len(idx_to_drop)} outliers using {out_alg}!")
-                st.rerun()
+        if st.button("Fill NA with Mean"):
+            st.session_state.df_raw = st.session_state.df_raw.fillna(
+                st.session_state.df_raw.mean(numeric_only=True)
+            )
+            st.rerun()
 
-    # --- TAB 4: FEATURE SELECTION (Fixed) ---
+    # --- TAB 4 ---
     with tabs[3]:
-        st.subheader("Feature Importance Analysis")
         X_fs = df_final.drop(columns=[target_col])
         y_fs = df_final[target_col]
-        
-        if st.button("Calculate Feature Importance"):
+
+        if st.button("Feature Importance"):
             scores = mutual_info_classif(X_fs, y_fs) if problem_type == "Classification" else mutual_info_regression(X_fs, y_fs)
-            mi_df = pd.Series(scores, index=X_fs.columns).sort_values(ascending=True)
-            fig_fs = px.bar(mi_df, orientation='h', title="Mutual Information Scores", template="plotly_dark")
-            st.plotly_chart(fig_fs, use_container_width=True)
+            st.bar_chart(pd.Series(scores, index=X_fs.columns))
 
-    # --- TAB 5: TRAINING ---
+    # --- TAB 5 TRAINING ---
     with tabs[4]:
-        st.subheader("Model Configuration")
-        m_choice = st.selectbox("Select Model", ["Random Forest", "KNN", "SVM", "Decision Tree", "Linear/Logistic"])
-        
-        c1, c2 = st.columns(2)
-        params = {}
-        with c1:
-            if m_choice == "KNN": params['k'] = st.slider("Neighbors (K)", 1, 50, 5)
-            elif m_choice == "SVM": params['kernel'] = st.selectbox("Kernel", ["rbf", "linear", "poly"])
-            elif m_choice == "Decision Tree": params['depth'] = st.slider("Depth", 1, 30, 10)
-        with c2:
-            k_fold_val = st.number_input("K-Fold Value", 2, 10, 5)
+        st.subheader("Training")
 
-        if st.button("🚀 Train Model"):
-            X_train_val = StandardScaler().fit_transform(df_final.drop(columns=[target_col]))
-            y_train_val = df_final[target_col]
-            
-            if m_choice == "Random Forest": m = RandomForestClassifier() if problem_type == "Classification" else RandomForestRegressor()
-            elif m_choice == "KNN": m = KNeighborsClassifier(n_neighbors=params['k']) if problem_type == "Classification" else KNeighborsRegressor(n_neighbors=params['k'])
-            elif m_choice == "SVM": m = SVC(kernel=params['kernel']) if problem_type == "Classification" else SVR(kernel=params['kernel'])
-            elif m_choice == "Decision Tree": m = DecisionTreeClassifier(max_depth=params['depth']) if problem_type == "Classification" else DecisionTreeRegressor(max_depth=params['depth'])
-            else: m = LogisticRegression() if problem_type == "Classification" else LinearRegression()
-            
-            res = cross_validate(m, X_train_val, y_train_val, cv=k_fold_val, return_train_score=True)
-            st.divider()
-            st.metric("Mean Validation Score", f"{res['test_score'].mean():.4f}")
-            st.metric("Mean Training Score", f"{res['train_score'].mean():.4f}")
+        if st.button("Train (CV)"):
+            X = StandardScaler().fit_transform(df_final.drop(columns=[target_col]))
+            y = df_final[target_col]
 
-    # --- TAB 6: TUNING (Safe from NameError) ---
+            model = RandomForestClassifier() if problem_type == "Classification" else RandomForestRegressor()
+            res = cross_validate(model, X, y, cv=5)
+
+            st.metric("Validation Score", res['test_score'].mean())
+
+    # --- TAB 6 DATA SPLIT ---
     with tabs[5]:
-        st.subheader("Hyperparameter Tuning")
-        if st.button("🏁 Run Grid Search"):
-            # We re-define X and y here locally to ensure they are always present
-            X_tune = StandardScaler().fit_transform(df_final.drop(columns=[target_col]))
-            y_tune = df_final[target_col]
-            
-            grid = {'n_estimators': [50, 100], 'max_depth': [5, 10]}
-            base = RandomForestClassifier() if problem_type == "Classification" else RandomForestRegressor()
-            gs = GridSearchCV(base, grid, cv=3)
-            with st.spinner("Tuning..."):
-                gs.fit(X_tune, y_tune)
-            st.success(f"Best Parameters: {gs.best_params_}")
-            st.metric("Optimized Score", f"{gs.best_score_:.4f}")
+        st.subheader("Train-Test Split")
+
+        test_size = st.slider("Test Size", 0.1, 0.5, 0.2)
+        if st.button("Split Data"):
+            X = df_final.drop(columns=[target_col])
+            y = df_final[target_col]
+
+            X = StandardScaler().fit_transform(X)
+
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)
+
+            st.session_state.X_train = X_train
+            st.session_state.X_test = X_test
+            st.session_state.y_train = y_train
+            st.session_state.y_test = y_test
+
+            st.success("Data Split Done")
+
+    # --- TAB 7 PERFORMANCE ---
+    with tabs[6]:
+        st.subheader("Performance Metrics")
+
+        if 'X_train' in st.session_state:
+
+            if st.button("Evaluate"):
+
+                model = RandomForestClassifier() if problem_type == "Classification" else RandomForestRegressor()
+
+                model.fit(st.session_state.X_train, st.session_state.y_train)
+                y_pred = model.predict(st.session_state.X_test)
+
+                if problem_type == "Classification":
+                    st.metric("Accuracy", accuracy_score(st.session_state.y_test, y_pred))
+                    st.metric("Precision", precision_score(st.session_state.y_test, y_pred, average='weighted'))
+                    st.metric("Recall", recall_score(st.session_state.y_test, y_pred, average='weighted'))
+                    st.metric("F1", f1_score(st.session_state.y_test, y_pred, average='weighted'))
+                else:
+                    st.metric("MSE", mean_squared_error(st.session_state.y_test, y_pred))
+                    st.metric("R2", r2_score(st.session_state.y_test, y_pred))
+
+        else:
+            st.warning("Split data first!")
+
+    # --- TAB 8 TUNING ---
+    with tabs[7]:
+        if st.button("Grid Search"):
+            X = StandardScaler().fit_transform(df_final.drop(columns=[target_col]))
+            y = df_final[target_col]
+
+            model = RandomForestClassifier() if problem_type == "Classification" else RandomForestRegressor()
+            grid = {'n_estimators':[50,100]}
+
+            gs = GridSearchCV(model, grid, cv=3)
+            gs.fit(X, y)
+
+            st.write(gs.best_params_)
+            st.metric("Best Score", gs.best_score_)
+
 else:
-    st.info("Awaiting Data Upload...")
+    st.info("Upload dataset to start")
